@@ -8,14 +8,21 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const VERSION = '0.2.2';
+const VERSION = '0.3.0';
 const NAME = 'claude-image-gen';
 const FLOW = 'https://flow.google.com';
 const HOME = process.env.CIG_HOME || path.join(os.homedir(), '.claude-image-gen');
 const ACCOUNTS_DIR = path.join(HOME, 'accounts');
 const CONFIG = path.join(HOME, 'config.json');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const log = (...a) => console.error(...a); // progress goes to stderr, saved file paths to stdout
+// The home folder holds signed-in browser profiles (Google session cookies), so only its owner may read it.
+function ensureHome() {
+  fs.mkdirSync(HOME, { recursive: true, mode: 0o700 });
+  if (process.platform !== 'win32') try { if (fs.statSync(HOME).mode & 0o077) fs.chmodSync(HOME, 0o700); } catch {}
+}
+// Progress goes to stderr, saved file paths to stdout. The MCP server also forwards progress to the client.
+let onLog = null;
+const log = (...a) => { console.error(...a); onLog?.(a.join(' ')); };
 
 // Exit codes an agent can branch on.
 const EXIT = { error: 1, signedOut: 2, busy: 3, credits: 4, refused: 5, rateLimited: 6 };
@@ -55,11 +62,11 @@ Usage:
   ${NAME} image "<prompt>" [options]     generate an image (free)
   ${NAME} video "<prompt>" [options]     generate a video (spends Flow credits)
   ${NAME} batch <prompts.txt> [options]  one prompt per line; skips files already saved
+  ${NAME} mcp                            run as an MCP server (stdio) for Claude and other MCP clients
 
 Accounts:
   ${NAME} login                          add a Google account (a sign-in window opens)
-  ${NAME} accounts                       list accounts; runs switch to the next one when one is
-                                         out of credits, rate-limited or signed out
+  ${NAME} accounts                       list accounts and show the active one
   ${NAME} use <number|email>             make an account the one runs start with
   ${NAME} logout [number|email]          remove an account (default: the active one)
   ${NAME} status                         check that each account is still signed in
@@ -134,11 +141,13 @@ async function running() {
 }
 
 async function launch(headless, browser, start = FLOW) {
+  ensureHome();
   fs.mkdirSync(PROFILE, { recursive: true });
   fs.rmSync(path.join(PROFILE, 'DevToolsActivePort'), { force: true });
   const exe = browserPath(browser);
   const args = ['--remote-debugging-port=0', `--user-data-dir=${PROFILE}`, '--no-first-run',
     '--no-default-browser-check', '--disable-search-engine-choice-screen', '--window-size=1400,1000'];
+  if (process.getuid?.() === 0) args.push('--no-sandbox'); // Chrome refuses to start as root (Docker) without it
   // Headless gets a normal screen size (it defaults to 800x600) and starts blank, so the
   // user agent can be fixed before Flow loads (see Page.open).
   if (headless) { args.push('--headless=new', '--screen-info={1920x1080}'); start = 'about:blank'; }
@@ -172,21 +181,38 @@ async function closeBrowser(b) {
 // Agents often fire several commands in parallel. They share the same browser profiles, so queue them.
 
 const LOCK = path.join(HOME, 'lock');
+const pidAlive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
+// The pid in the lock file: null when there is no lock, 0 while its owner is still writing it.
+const lockHolder = () => { try { return Number(fs.readFileSync(LOCK, 'utf8').trim()) || 0; } catch { return null; } };
+const fileAge = f => { try { return Date.now() - fs.statSync(f).mtimeMs; } catch { return 0; } };
+
 async function lock(waitS = 900) {
-  fs.mkdirSync(HOME, { recursive: true });
-  for (let i = 0; ; i++) {
-    try { fs.writeFileSync(LOCK, String(process.pid), { flag: 'wx' }); return; } catch {}
-    const pid = Number(fs.readFileSync(LOCK, 'utf8').trim() || 0);
-    let alive = false;
-    try { if (pid) { process.kill(pid, 0); alive = true; } } catch (e) { alive = e.code === 'EPERM'; }
-    if (!alive) { fs.rmSync(LOCK, { force: true }); continue; }
-    if (i === 0) log(`waiting for another ${NAME} run (pid ${pid}) to finish...`);
-    if (i * 2 > waitS) throw new CliError(`Another ${NAME} run (pid ${pid}) has held the browser for ${waitS}s. Wait for it, or delete ${LOCK} if it is stuck.`, EXIT.busy);
-    await sleep(2000);
+  ensureHome();
+  const deadline = Date.now() + waitS * 1000;
+  let told = false;
+  for (;;) {
+    try { fs.writeFileSync(LOCK, String(process.pid), { flag: 'wx' }); return; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    const pid = lockHolder();
+    if (Date.now() > deadline) throw new CliError(`Another ${NAME} run (pid ${pid}) has held the browser for ${waitS}s. Wait for it, or delete ${LOCK} if it is stuck.`, EXIT.busy);
+    if (pid === null) { await sleep(10); continue; } // released between our two steps; try again
+    // An empty lock file is one being written right now, unless it has been empty for a while.
+    if (pid === 0 ? fileAge(LOCK) > 5000 : !pidAlive(pid)) breakStale(pid);
+    if (pid === 0 || !pidAlive(pid)) { await sleep(20); continue; }
+    if (!told) { log(`waiting for another ${NAME} run (pid ${pid}) to finish...`); told = true; }
+    await sleep(200);
   }
 }
+// Remove a lock left behind by a run that died. Two waiters can both see the same dead pid, and the
+// first one may already have taken a fresh lock by the time the second acts, so only the holder of
+// lock.break may remove the lock, and only while the dead pid still holds it.
+function breakStale(pid) {
+  const brk = LOCK + '.break';
+  if (fileAge(brk) > 10000) fs.rmSync(brk, { force: true }); // its holder died mid-break
+  try { fs.writeFileSync(brk, String(process.pid), { flag: 'wx' }); } catch { return; }
+  try { if (lockHolder() === pid) fs.rmSync(LOCK, { force: true }); } finally { fs.rmSync(brk, { force: true }); }
+}
 function unlock() {
-  try { if (fs.readFileSync(LOCK, 'utf8').trim() === String(process.pid)) fs.rmSync(LOCK, { force: true }); } catch {}
+  if (lockHolder() === process.pid) fs.rmSync(LOCK, { force: true });
 }
 
 // ---------- CDP ----------
@@ -429,6 +455,7 @@ async function configure(page, o) {
 }
 
 function sniff(buf) {
+  if (buf.length < 4) return null;
   if (buf[0] === 0x89 && buf[1] === 0x50) return '.png';
   if (buf[0] === 0xff && buf[1] === 0xd8) return '.jpg';
   if (buf.slice(0, 4).toString() === 'RIFF' && buf.slice(8, 12).toString() === 'WEBP') return '.webp';
@@ -526,7 +553,7 @@ async function generate(page, prompt, out, o) {
       const msg = newLines.slice(i, i + 3).join(' ');
       // "Unusual activity" is Google's limit on many generations from one account in a short time.
       if (/unusual activity/i.test(msg)) throw new CliError(`RATE LIMITED: Flow says "${msg}" Too many generations ` +
-        `in a short time. Nothing was charged. Wait a while (it can take a few hours) and try again, or add another account with "${NAME} login".`, EXIT.rateLimited);
+        `in a short time. Nothing was charged. Wait a while (it can take a few hours) and try again.`, EXIT.rateLimited);
       if (/(not enough|out of|insufficient|no) credits/i.test(msg)) throw new CliError(`OUT OF CREDITS: Flow says "${msg}" Credits refill daily; images are free.`, EXIT.credits);
       throw new CliError(`Flow refused or failed: "${msg}"`, EXIT.refused);
     }
@@ -550,13 +577,13 @@ async function generate(page, prompt, out, o) {
     fs.writeFileSync(file, buf);
     saved.push(path.resolve(file));
   }
-  return saved;
+  return { files: saved, model, credits };
 }
 
 // ---------- accounts ----------
 
 const readConfig = () => { try { return JSON.parse(fs.readFileSync(CONFIG, 'utf8')); } catch { return {}; } };
-const writeConfig = c => { fs.mkdirSync(HOME, { recursive: true }); fs.writeFileSync(CONFIG, JSON.stringify(c, null, 2)); };
+const writeConfig = c => { ensureHome(); fs.writeFileSync(CONFIG, JSON.stringify(c, null, 2)); };
 
 // Signed-in accounts, alphabetical (the numbers "accounts" shows), and the active one.
 function accounts() {
@@ -599,7 +626,8 @@ async function eachAccount(a, fn) {
   throw new CliError(`Every account failed:\n${failed.map(([n, e]) => `  ${n}: ${e.message}`).join('\n')}`, code);
 }
 
-// ---------- commands ----------
+
+// ---------- commands (shared by the command line and the MCP server) ----------
 
 function parseArgs(argv) {
   const a = { _: [], show: false, video: false, count: 1 };
@@ -615,18 +643,44 @@ function parseArgs(argv) {
     else if (['-m', '--model'].includes(v)) a.model = val(i++, v).toLowerCase();
     else if (['-a', '--aspect'].includes(v)) a.aspect = val(i++, v);
     else if (['-n', '--count'].includes(v)) a.count = Number(val(i++, v));
-    else if (['-d', '--duration'].includes(v)) a.duration = val(i++, v).replace(/^(\d+)$/, '$1s');
-    else if (['-r', '--resolution'].includes(v)) a.resolution = val(i++, v).replace(/^(\d+)$/, '$1p');
+    else if (['-d', '--duration'].includes(v)) a.duration = val(i++, v);
+    else if (['-r', '--resolution'].includes(v)) a.resolution = val(i++, v);
     else if (v === '--account') a.account = val(i++, v);
     else if (v === '--browser') a.browser = val(i++, v).toLowerCase();
     else if (v.startsWith('-') && v.length > 1) throw new CliError(`Unknown option "${v}". Run "${NAME} --help".`);
     else a._.push(v);
   }
-  if (!(a.count >= 1 && a.count <= 4 && Number.isInteger(a.count))) throw new CliError('--count must be 1, 2, 3 or 4.');
   return a;
 }
 
 const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50) || 'flow';
+const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const isDir = p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
+
+function genOptions(a, kind) {
+  if (kind === 'image' && (a.duration || a.resolution)) throw new CliError('--duration and --resolution are video options.');
+  const count = Number(a.count ?? 1);
+  if (!(Number.isInteger(count) && count >= 1 && count <= 4)) throw new CliError('--count must be 1, 2, 3 or 4.');
+  return { kind, model: a.model || (kind === 'video' ? 'omni-flash' : 'nano-banana-2'), aspect: a.aspect || '16:9', count,
+    duration: a.duration && String(a.duration).replace(/^(\d+)$/, '$1s'), resolution: a.resolution && String(a.resolution).replace(/^(\d+)$/, '$1p') };
+}
+
+// Where to save: the path asked for, or a name made from the prompt (inside the folder asked for, if it is one).
+function outPath(want, prompt, base = '.') {
+  const name = `${slug(prompt)}-${Date.now()}`;
+  if (!want) return path.resolve(base, name);
+  const out = path.resolve(base, want);
+  return /[\\/]$/.test(want) || isDir(out) ? path.join(out, name) : out;
+}
+
+// The prompts of a batch still to make. Prompt 3 is saved as 003-<slug>.<ext> (or -1..-4 with a count),
+// so a batch that stopped halfway picks up where it left off.
+function batchTodo(prompts, dir, kind) {
+  const ext = kind === 'video' ? '(mp4|webm)' : '(png|jpe?g|webp)';
+  const files = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  return prompts.map((p, i) => ({ p, i, base: path.join(dir, `${String(i + 1).padStart(3, '0')}-${slug(p)}`) }))
+    .filter(t => { const re = new RegExp(`^${escapeRe(path.basename(t.base))}(-[1-4])?\\.${ext}$`, 'i'); return !files.some(f => re.test(f)); });
+}
 
 // Run fn with a page in the selected account's browser, then close the browser if this run started it.
 let cleanup = null;
@@ -644,7 +698,11 @@ async function withPage(a, fn) {
       // CIG_DEBUG=1 saves what the browser showed when it failed, for bug reports.
       if (process.env.CIG_DEBUG) {
         const shot = await page.send('Page.captureScreenshot', { format: 'png' }).catch(() => null);
-        if (shot) { fs.writeFileSync('claude-image-gen-debug.png', Buffer.from(shot.data, 'base64')); log('debug screenshot: claude-image-gen-debug.png'); }
+        // In the current folder, or the temp folder when that isn't writable (an MCP server started in /).
+        for (const dir of shot ? ['.', os.tmpdir()] : []) {
+          const f = path.resolve(dir, 'claude-image-gen-debug.png');
+          try { fs.writeFileSync(f, Buffer.from(shot.data, 'base64')); log(`debug screenshot: ${f}`); break; } catch {}
+        }
       }
       throw e;
     });
@@ -657,62 +715,107 @@ async function locked(fn, waitS) {
   try { return await fn(); } finally { unlock(); }
 }
 
-function genOptions(a, kind) {
-  if (kind === 'image' && (a.duration || a.resolution)) throw new CliError('--duration and --resolution are video options.');
-  return { kind, model: a.model || (kind === 'video' ? 'omni-flash' : 'nano-banana-2'), aspect: a.aspect || '16:9',
-    count: a.count, duration: a.duration, resolution: a.resolution };
+// Generate one prompt with the first account that can. Returns { files, model, credits }.
+async function make(a, kind, prompt, out) {
+  const o = genOptions(a, kind);
+  return locked(() => eachAccount(a, () => withPage(a, page => generate(page, prompt, out, o))));
 }
 
 function accountsText() {
   const { list, active } = accounts();
   if (!list.length) return `No accounts yet. Run "${NAME} login" to add one.`;
-  return `Accounts (runs start with the active one and switch to the next when one is out of credits,\n` +
-    `rate-limited or signed out):\n${list.map((n, i) => `  ${i + 1}. ${n}${n === active ? '  (active)' : ''}`).join('\n')}\n` +
+  return `Accounts (runs use the active one; if it is signed out, out of credits or rate-limited, the next is tried):\n` +
+    `${list.map((n, i) => `  ${i + 1}. ${n}${n === active ? '  (active)' : ''}`).join('\n')}\n` +
     `Add another: ${NAME} login    Make one active: ${NAME} use <number>    Remove: ${NAME} logout <number>`;
+}
+
+function useAccount(want) {
+  if (!want) throw new CliError(`Usage: ${NAME} use <number or email>\n\n${accountsText()}`);
+  const cfg = readConfig();
+  cfg.active = findAccount(want);
+  writeConfig(cfg);
+  return `Active account: ${cfg.active}\n\n${accountsText()}`;
+}
+
+function logout(want) {
+  return locked(async () => {
+    const { list, active } = accounts();
+    if (!list.length) return 'No accounts to remove.';
+    const email = want ? findAccount(want) : active;
+    select(path.join(ACCOUNTS_DIR, email));
+    await closeBrowser(await running());
+    fs.rmSync(path.join(ACCOUNTS_DIR, email), { recursive: true, force: true });
+    return `Removed ${email}.\n\n${accountsText()}`;
+  }, 30);
+}
+
+// Open Flow with each account to see whether Google still has it signed in.
+function status(a) {
+  return locked(async () => {
+    const { list, active } = accounts();
+    if (!list.length) throw noAccount();
+    const lines = [];
+    let ok = 0;
+    for (const email of a.account ? [findAccount(a.account)] : list) {
+      select(path.join(ACCOUNTS_DIR, email));
+      const tag = `${email}${email === active ? ' (active)' : ''}`;
+      try {
+        await withPage(a, page => openProject(page));
+        lines.push(`${tag}: signed in`);
+        ok++;
+      } catch (e) {
+        if (e.code !== EXIT.signedOut) throw e;
+        lines.push(`${tag}: NOT SIGNED IN. Run "${NAME} login" and sign in as ${email}.`);
+      }
+    }
+    return { text: lines.join('\n'), ok };
+  });
 }
 
 // Sign in with a fresh profile, then file it under the account's email. Signing in to an
 // account that is already there replaces it, which is how a signed-out account is fixed.
-async function login(a) {
-  const tmp = path.join(ACCOUNTS_DIR, `.signing-in-${process.pid}`);
-  // Clear sign-ins a killed run left behind (we hold the lock, so none of them is still in progress).
-  try { for (const n of fs.readdirSync(ACCOUNTS_DIR)) if (n.startsWith('.signing-in-')) fs.rmSync(path.join(ACCOUNTS_DIR, n), { recursive: true, force: true }); } catch {}
-  select(tmp);
-  let b = null;
-  try {
-    b = await launch(false, a.browser, `https://accounts.google.com/ServiceLogin?continue=${encodeURIComponent(FLOW + '/')}`);
-    const page = await Page.open(b, true);
-    log(`A browser window is open. Sign in with your Google account and wait for Flow to load; the window\n` +
-      `closes by itself. (Flow needs an account whose owner is 18 or older.)`);
-    const deadline = Date.now() + 15 * 60 * 1000;
-    let s;
-    while (Date.now() < deadline) {
-      try {
-        s = await page.eval(JS.state);
-        // Flow's marketing page means the sign-in didn't carry over; send the person back to Google's sign-in.
-        if (s === 'signedout' && /flow\.google\.com/.test(await page.eval('location.host'))) {
-          await page.goto(`https://accounts.google.com/ServiceLogin?continue=${encodeURIComponent(FLOW + '/')}`);
-          continue;
-        }
-        // Wait out Flow's first-visit dialogs (terms, welcome) so the person can accept them.
-        if ((s === 'home' || s === 'project') && !await page.eval(`!!document.querySelector('[role=dialog],mat-dialog-container')`)) break;
-      } catch { throw new CliError('The sign-in window was closed before sign-in finished. Run login again.'); }
-      if (s === 'unavailable') throw new CliError('Google Flow says it is not available for this account. It needs an account whose owner is 18 or older, in a country where Flow is offered.');
-      await sleep(1500);
+function login(a) {
+  return locked(async () => {
+    const tmp = path.join(ACCOUNTS_DIR, `.signing-in-${process.pid}`);
+    // Clear sign-ins a killed run left behind (we hold the lock, so none of them is still in progress).
+    try { for (const n of fs.readdirSync(ACCOUNTS_DIR)) if (n.startsWith('.signing-in-')) fs.rmSync(path.join(ACCOUNTS_DIR, n), { recursive: true, force: true }); } catch {}
+    select(tmp);
+    let b = null;
+    try {
+      b = await launch(false, a.browser, `https://accounts.google.com/ServiceLogin?continue=${encodeURIComponent(FLOW + '/')}`);
+      const page = await Page.open(b, true);
+      log(`A browser window is open. Sign in with your Google account and wait for Flow to load; the window\n` +
+        `closes by itself. (Flow needs an account whose owner is 18 or older.)`);
+      const deadline = Date.now() + 15 * 60 * 1000;
+      let s;
+      while (Date.now() < deadline) {
+        try {
+          s = await page.eval(JS.state);
+          // Flow's marketing page means the sign-in didn't carry over; send the person back to Google's sign-in.
+          if (s === 'signedout' && /flow\.google\.com/.test(await page.eval('location.host'))) {
+            await page.goto(`https://accounts.google.com/ServiceLogin?continue=${encodeURIComponent(FLOW + '/')}`);
+            continue;
+          }
+          // Wait out Flow's first-visit dialogs (terms, welcome) so the person can accept them.
+          if ((s === 'home' || s === 'project') && !await page.eval(`!!document.querySelector('[role=dialog],mat-dialog-container')`)) break;
+        } catch { throw new CliError('The sign-in window was closed before sign-in finished. Run login again.'); }
+        if (s === 'unavailable') throw new CliError('Google Flow says it is not available for this account. It needs an account whose owner is 18 or older, in a country where Flow is offered.');
+        await sleep(1500);
+      }
+      if (s !== 'home' && s !== 'project') throw new CliError('Timed out after 15 minutes waiting for sign-in.');
+      await sleep(2000); // let the browser finish saving the session
+      const email = ((await page.eval(JS.account).catch(() => '')).match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/) || [])[0];
+      page.close();
+      await closeBrowser(b);
+      b = null;
+      if (!email) throw new CliError('Signed in, but could not read which Google account it is. Run login again.');
+      const { key, replaced } = await fileAccount(tmp, email);
+      return `${replaced ? 'Signed in again' : 'Signed in'} as ${key}.\n\n${accountsText()}`;
+    } finally {
+      if (b) await closeBrowser(b);
+      fs.rmSync(tmp, { recursive: true, force: true });
     }
-    if (s !== 'home' && s !== 'project') throw new CliError('Timed out after 15 minutes waiting for sign-in.');
-    await sleep(2000); // let the browser finish saving the session
-    const email = ((await page.eval(JS.account).catch(() => '')).match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/) || [])[0];
-    page.close();
-    await closeBrowser(b);
-    b = null;
-    if (!email) throw new CliError('Signed in, but could not read which Google account it is. Run login again.');
-    const { key, replaced } = await fileAccount(tmp, email);
-    console.log(`${replaced ? 'Signed in again' : 'Signed in'} as ${key}.\n\n${accountsText()}`);
-  } finally {
-    if (b) await closeBrowser(b);
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
+  }, 30);
 }
 
 // Move a freshly signed-in profile folder to accounts/<email>, replacing an old sign-in of the same account.
@@ -729,6 +832,146 @@ async function fileAccount(tmp, email) {
   return { key, replaced };
 }
 
+// ---------- MCP server ----------
+// "claude-image-gen mcp" speaks the Model Context Protocol over stdio (JSON-RPC 2.0, one message per line),
+// so Claude Code, Claude Desktop, Cursor and other MCP clients can call the generator as tools.
+
+const MCP_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
+const IMAGE_ASPECTS = ['16:9', '4:3', '1:1', '3:4', '9:16'], VIDEO_ASPECTS = ['16:9', '9:16'];
+const PREVIEW_MAX = 3.5 * 1024 * 1024; // images bigger than this are returned as a path only
+const MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp' };
+
+// Where MCP saves files given no absolute path: CIG_OUTPUT_DIR, else the folder the client started the server in,
+// unless that is the filesystem root or read-only (as with desktop apps); then ~/claude-image-gen.
+function outputDir() {
+  if (process.env.CIG_OUTPUT_DIR) return path.resolve(process.env.CIG_OUTPUT_DIR);
+  const cwd = process.cwd();
+  try { if (path.parse(cwd).root !== cwd) { fs.accessSync(cwd, fs.constants.W_OK); return cwd; } } catch {}
+  return path.join(os.homedir(), NAME);
+}
+
+const MCP_INSTRUCTIONS = `Generates images (free) and videos (spend Google Flow credits) with Google Flow through the user's
+own signed-in Google account. Calls run one at a time; an image takes 20-60 s, a video 1-3 min. Save files into the
+user's project by passing an absolute "output" path. If a tool reports NOT SIGNED IN, call "login" and tell the user
+to sign in in the browser window that opens. Tell the user what a video will cost before generating several.`;
+
+function mcpTools() {
+  const s = (description, extra) => ({ type: 'string', description, ...extra });
+  const gen = kind => ({
+    prompt: s(`What the ${kind} should show: subject, style, composition, lighting${kind === 'video' ? ', camera motion' : ''}.`),
+    model: s(`Model. Default ${kind === 'video' ? 'omni-flash' : 'nano-banana-2'}.`, { enum: MODELS[kind].map(([k]) => k) }),
+    aspect_ratio: s('Aspect ratio. Default 16:9.', { enum: kind === 'video' ? VIDEO_ASPECTS : IMAGE_ASPECTS }),
+    count: { type: 'integer', minimum: 1, maximum: 4, description: 'How many to make from the prompt (files get -1, -2, ...). Default 1.' },
+    output: s(`Where to save: a file path without extension (the real one is added), or a folder ending in "/". ` +
+      `Relative paths are resolved against ${outputDir()}. Default: a name made from the prompt, in that folder.`),
+    account: s('Use only this account: its number from list_accounts, or its email. Default: the active account, then the others.'),
+  });
+  const files = { type: 'object', properties: { files: { type: 'array', items: { type: 'string' } }, model: { type: 'string' }, credits: { type: 'number' } }, required: ['files'] };
+  const write = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
+  return [
+    { name: 'generate_image', title: 'Generate image',
+      description: 'Generate an image with Google Flow (Nano Banana). Free. Returns the saved file paths and the image itself. ' +
+        'nano-banana-pro has the best quality and text rendering; nano-banana-2-lite is fastest.',
+      inputSchema: { type: 'object', properties: { ...gen('image'),
+        preview: { type: 'boolean', description: 'Return the image in the result so you can see it. Default true.' } }, required: ['prompt'] },
+      outputSchema: files, annotations: write },
+    { name: 'generate_video', title: 'Generate video',
+      description: 'Generate a video with sound with Google Flow (Omni Flash or Veo). Spends Flow credits, which refill daily: ' +
+        'omni-flash 4-15 credits (4s at 360p is cheapest), veo-lite ~10, veo-fast ~20, veo-quality ~100. Returns the saved file paths.',
+      inputSchema: { type: 'object', properties: { ...gen('video'),
+        duration: s('omni-flash only. Default 8s. Veo is always 8s.', { enum: ['4s', '6s', '8s', '10s'] }),
+        resolution: s('omni-flash only. Default 720p. Veo is always 720p.', { enum: ['360p', '720p'] }) }, required: ['prompt'] },
+      outputSchema: files, annotations: write },
+    { name: 'list_accounts', title: 'List accounts', description: 'List the signed-in Google accounts and which one is active.',
+      inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true, openWorldHint: false } },
+    { name: 'check_accounts', title: 'Check sign-ins',
+      description: 'Check that each Google account is still signed in to Flow. Opens a headless browser per account (about 10 s each).',
+      inputSchema: { type: 'object', properties: { account: s('Check only this account (number or email).') } },
+      annotations: { readOnlyHint: true, openWorldHint: true } },
+    { name: 'login', title: 'Sign in',
+      description: 'Open a browser window on the user\'s screen to sign in to a Google account (adds it, or refreshes a signed-out one). ' +
+        'Waits up to 15 minutes. Tell the user to sign in in that window; the account must belong to someone 18 or older.',
+      inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true } },
+  ];
+}
+
+const HINTS = {
+  [EXIT.signedOut]: 'Call the "login" tool and ask the user to sign in in the window that opens, then retry.',
+  [EXIT.credits]: 'Credits refill daily. Images are free; omni-flash at 4s/360p is the cheapest video.',
+  [EXIT.refused]: 'Rephrase the prompt (no real people, logos or unsafe content).',
+  [EXIT.rateLimited]: 'Nothing was charged. Wait before retrying; it can take a few hours.',
+};
+const CODE_NAMES = { 1: 'error', 2: 'not_signed_in', 3: 'busy', 4: 'out_of_credits', 5: 'refused', 6: 'rate_limited' };
+
+async function mcpCall(name, args = {}) {
+  const a = { _: [], show: false, model: args.model?.toLowerCase(), aspect: args.aspect_ratio, count: args.count ?? 1,
+    duration: args.duration, resolution: args.resolution, account: args.account != null ? String(args.account) : undefined };
+  if (name === 'generate_image' || name === 'generate_video') {
+    const kind = name === 'generate_video' ? 'video' : 'image';
+    if (typeof args.prompt !== 'string' || !args.prompt.trim()) throw new CliError('"prompt" is required.');
+    const r = await make(a, kind, args.prompt, outPath(args.output, args.prompt, outputDir()));
+    const content = [{ type: 'text', text: `Saved ${r.files.length} ${kind}${r.files.length > 1 ? 's' : ''} ` +
+      `(${r.model}, ${r.credits ? `used ${r.credits} Flow credits` : 'free'}):\n${r.files.join('\n')}` }];
+    if (kind === 'image' && args.preview !== false)
+      for (const f of r.files) if (fs.statSync(f).size <= PREVIEW_MAX) content.push({ type: 'image', data: fs.readFileSync(f).toString('base64'), mimeType: MIME[path.extname(f)] });
+    return { content, structuredContent: { files: r.files, model: r.model, credits: r.credits || 0 } };
+  }
+  if (name === 'list_accounts') return { content: [{ type: 'text', text: accountsText() }] };
+  if (name === 'check_accounts') { const r = await status(a); return { content: [{ type: 'text', text: r.text }], isError: !r.ok }; }
+  if (name === 'login') return { content: [{ type: 'text', text: await login(a) }] };
+  return null;
+}
+
+function mcpServe() {
+  const send = m => process.stdout.write(JSON.stringify(m) + '\n');
+  console.log = console.error; // stdout carries the protocol; nothing else may write to it
+  let queue = Promise.resolve(); // one tool call at a time: they share the browser profiles
+
+  async function handle(m) {
+    const reply = result => send({ jsonrpc: '2.0', id: m.id, result });
+    const fail = (code, message) => send({ jsonrpc: '2.0', id: m.id, error: { code, message } });
+    if (m.method === 'initialize') {
+      const want = m.params?.protocolVersion;
+      return reply({ protocolVersion: MCP_VERSIONS.includes(want) ? want : MCP_VERSIONS[0], capabilities: { tools: {} },
+        serverInfo: { name: NAME, title: 'Claude Image Gen', version: VERSION }, instructions: MCP_INSTRUCTIONS });
+    }
+    if (m.method === 'ping') return reply({});
+    if (m.method === 'tools/list') return reply({ tools: mcpTools() });
+    if (m.method === 'tools/call') {
+      const { name, arguments: args } = m.params || {};
+      if (!mcpTools().some(t => t.name === name)) return fail(-32602, `Unknown tool "${name}".`);
+      // Progress notifications show what is happening and keep the client from timing out on long videos.
+      const token = m.params?._meta?.progressToken, started = Date.now();
+      let n = 0;
+      const progress = message => token !== undefined && send({ jsonrpc: '2.0', method: 'notifications/progress',
+        params: { progressToken: token, progress: ++n, message: message || `working (${Math.round((Date.now() - started) / 1000)}s)` } });
+      const tick = setInterval(progress, 15000);
+      const job = queue.then(async () => {
+        onLog = msg => progress(String(msg).split('\n')[0]);
+        try { reply(await mcpCall(name, args)); } catch (e) {
+          const code = e instanceof CliError ? e.code : EXIT.error;
+          reply({ content: [{ type: 'text', text: `${CODE_NAMES[code] || 'error'}: ${e.message}${HINTS[code] ? ' ' + HINTS[code] : ''}` }], isError: true });
+        } finally { onLog = null; clearInterval(tick); }
+      });
+      queue = job.catch(() => {});
+      return job;
+    }
+    if (m.id !== undefined && m.method) return fail(-32601, `Method not found: ${m.method}`);
+  }
+
+  const rl = require('readline').createInterface({ input: process.stdin });
+  rl.on('line', line => {
+    if (!line.trim()) return;
+    let m;
+    try { m = JSON.parse(line); } catch { return send({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }); }
+    for (const msg of Array.isArray(m) ? m : [m]) handle(msg).catch(e => log(`mcp: ${e.message}`));
+  });
+  rl.on('close', async () => { if (cleanup) await cleanup(); unlock(); process.exit(0); });
+  log(`${NAME} ${VERSION} MCP server ready on stdio`);
+}
+
+// ---------- command line ----------
+
 async function main() {
   if (typeof WebSocket === 'undefined') throw new CliError(`${NAME} needs Node.js 22 or newer (you have ${process.version}).`);
   const a = parseArgs(process.argv.slice(2));
@@ -736,56 +979,24 @@ async function main() {
   if (a.version) return console.log(VERSION);
   if (a.help || !cmd) return console.log(HELP);
 
-  if (cmd === 'login') return locked(() => login(a), 30);
-
+  if (cmd === 'mcp') return mcpServe();
+  if (cmd === 'login') return console.log(await login(a));
   if (cmd === 'accounts') return console.log(accountsText());
-
-  if (cmd === 'use') {
-    if (!arg) throw new CliError(`Usage: ${NAME} use <number or email>\n\n${accountsText()}`);
-    const cfg = readConfig();
-    cfg.active = findAccount(arg);
-    writeConfig(cfg);
-    return console.log(`Active account: ${cfg.active}\n\n${accountsText()}`);
+  if (cmd === 'use') return console.log(useAccount(arg));
+  if (cmd === 'logout') return console.log(await logout(arg));
+  if (cmd === 'status') {
+    const r = await status(a);
+    console.log(r.text);
+    if (!r.ok) process.exitCode = EXIT.signedOut;
+    return;
   }
-
-  if (cmd === 'logout') return locked(async () => {
-    const { list, active } = accounts();
-    if (!list.length) return console.log('No accounts to remove.');
-    const email = arg ? findAccount(arg) : active;
-    select(path.join(ACCOUNTS_DIR, email));
-    await closeBrowser(await running());
-    fs.rmSync(path.join(ACCOUNTS_DIR, email), { recursive: true, force: true });
-    console.log(`Removed ${email}.\n\n${accountsText()}`);
-  }, 30);
-
-  if (cmd === 'status') return locked(async () => {
-    const { list, active } = accounts();
-    if (!list.length) throw noAccount();
-    let ok = 0;
-    for (const email of a.account ? [findAccount(a.account)] : list) {
-      select(path.join(ACCOUNTS_DIR, email));
-      try {
-        await withPage(a, async page => { await openProject(page); });
-        console.log(`${email}${email === active ? ' (active)' : ''}: signed in`);
-        ok++;
-      } catch (e) {
-        if (e.code !== EXIT.signedOut) throw e;
-        console.log(`${email}${email === active ? ' (active)' : ''}: NOT SIGNED IN. Run "${NAME} login" and sign in as ${email}.`);
-      }
-    }
-    if (!ok) process.exitCode = EXIT.signedOut;
-  });
 
   if (cmd === 'image' || cmd === 'video' || cmd === 'gen') {
     const kind = cmd === 'video' ? 'video' : 'image';
     if (!arg) throw new CliError(`Usage: ${NAME} ${kind} "<prompt>" [-o file]`);
-    const o = genOptions(a, kind);
-    const name = `${slug(arg)}-${Date.now()}`;
-    let out = a.out || name;
-    if (/[\\/]$/.test(out) || (fs.existsSync(out) && fs.statSync(out).isDirectory())) out = path.join(out, name);
-    return locked(() => eachAccount(a, () => withPage(a, async page => {
-      for (const f of await generate(page, arg, out, o)) console.log(f);
-    })));
+    const r = await make(a, kind, arg, outPath(a.out, arg));
+    for (const f of r.files) console.log(f);
+    return;
   }
 
   if (cmd === 'batch') {
@@ -796,12 +1007,8 @@ async function main() {
     const o = genOptions(a, a.video ? 'video' : 'image');
     const dir = a.out || 'flow-output';
     fs.mkdirSync(dir, { recursive: true });
-    const todo = prompts.map((p, i) => ({ p, i, base: path.join(dir, `${String(i + 1).padStart(3, '0')}-${slug(p)}`) }))
-      .filter(t => {
-        const done = fs.readdirSync(dir).some(f => f.startsWith(path.basename(t.base)) && /\.(png|jpe?g|webp|mp4|webm)$/.test(f));
-        if (done) log(`[${t.i + 1}/${prompts.length}] already saved, skipping`);
-        return !done;
-      });
+    const todo = batchTodo(prompts, dir, o.kind);
+    if (todo.length < prompts.length) log(`${prompts.length - todo.length} of ${prompts.length} already saved, skipping them`);
     let ok = 0, failed = 0, streak = 0;
     try {
       // An account that runs out of credits or gets rate-limited throws, and the next account picks up the rest.
@@ -809,7 +1016,7 @@ async function main() {
         while (todo.length) {
           const t = todo[0], tag = `[${t.i + 1}/${prompts.length}]`;
           try {
-            for (const f of await generate(page, t.p, t.base, o)) console.log(f);
+            for (const f of (await generate(page, t.p, t.base, o)).files) console.log(f);
             ok++; streak = 0; todo.shift();
           } catch (e) {
             if (SWITCHABLE.includes(e.code)) throw e;
@@ -829,7 +1036,11 @@ async function main() {
 }
 
 if (require.main === module) {
-  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => { if (cleanup) await cleanup(); unlock(); process.exit(130); });
+  for (const [sig, code] of [['SIGINT', 130], ['SIGTERM', 143]]) process.on(sig, async () => { if (cleanup) await cleanup(); unlock(); process.exit(code); });
   main().catch(e => { console.error(`error: ${e.message}`); process.exit(e.code || EXIT.error); });
 }
-module.exports = { Page, downloadOriginal, JS, launch, closeBrowser, openProject, select, fileAccount, accounts };
+module.exports = {
+  Page, Cdp, JS, launch, closeBrowser, running, browserPath, select, generate, downloadOriginal, openProject,
+  fileAccount, accounts, findAccount, eachAccount, lock, unlock, parseArgs, genOptions, resolveModel, sniff, slug,
+  outPath, batchTodo, mcpTools, mcpCall, EXIT, CliError, VERSION,
+};

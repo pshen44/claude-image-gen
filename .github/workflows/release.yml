@@ -1,0 +1,29 @@
+# Push a tag like v0.3.0 (after "node scripts/bump.js 0.3.0" is committed) to publish to npm and make a GitHub Release.
+# Needs the repository secret NPM_TOKEN: an npm automation token, or switch to npm trusted publishing.
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+  id-token: write # npm provenance
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: The tag matches the version everywhere
+        run: |
+          node scripts/bump.js --check
+          test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - run: node --test
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: gh release create "$GITHUB_REF_NAME" --generate-notes --title "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,98 @@
+<!doctype html>
+<!-- A stand-in for a Google Flow project page: the controls claude-image-gen looks for, with the same
+     labels, roles and aria-labels, and just enough behavior to drive it. When Flow changes its page,
+     change this to match and the browser tests show what breaks. Query: ?refuse=1  ?credits=0 -->
+<meta charset="utf-8">
+<title>Fake Flow</title>
+<style>
+  body { font: 14px sans-serif; margin: 0; padding: 20px; }
+  .tile { display: inline-block; position: relative; width: 200px; height: 120px; margin: 4px; }
+  .tile img { width: 200px; height: 120px; background: #ccc; }
+  #box { border: 1px solid #999; min-height: 40px; width: 600px; margin: 10px 0; }
+  .cdk-overlay-container { position: fixed; top: 0; right: 0; width: 420px; background: #fff; z-index: 10; }
+  .cdk-overlay-container button, .cdk-overlay-container [role=menuitem] { display: block; margin: 2px; }
+</style>
+<a aria-label="Google Account: Test User (test@example.com)" href="#">account</a>
+<div id="grid"></div>
+<div contenteditable="true" id="box"></div>
+<button aria-label="Settings trigger" id="trigger">tune</button>
+<button aria-label="Start generation" id="go">Create</button>
+<div id="messages"></div>
+<div class="cdk-overlay-container" id="overlay"></div>
+<script>
+const q = new URLSearchParams(location.search);
+const MODELS = { Image: ['Nano Banana 2', 'Nano Banana Pro', 'Nano Banana 2 Lite'],
+                 Video: ['Omni 1.1 Flash', 'Veo 3.1 - Lite', 'Veo 3.1 - Fast', 'Veo 3.1 - Quality'] };
+const S = { mode: 'Image', model: { Image: 'Nano Banana 2', Video: 'Omni 1.1 Flash' }, aspect: '16:9', count: 'x1',
+            duration: '8s', res: '720p', popup: false, modelMenu: false, tileMenu: null, prompts: [], downloads: 0 };
+const icon = name => `<mat-icon>${name}</mat-icon>`;
+const radio = (group, label, before = '', after = '') =>
+  `<button role="radio" data-group="${group}" data-label="${label}" aria-checked="${S[group] === label}">${before}${label}${after}</button>`;
+const cost = () => /Omni/.test(S.model.Video) ? ({ '4s': 4, '6s': 6, '8s': 8, '10s': 10 }[S.duration] + (S.res === '720p' ? 3 : 0)) : 20;
+
+function render() {
+  const video = S.mode === 'Video', omni = /Omni/.test(S.model.Video);
+  document.getElementById('go').disabled = video && q.get('credits') === '0';
+  let h = '';
+  if (S.popup) {
+    const aspects = video ? ['16:9', '9:16'] : ['16:9', '4:3', '1:1', '3:4', '9:16'];
+    if (!aspects.includes(S.aspect)) S.aspect = '16:9';
+    h += ['Image', 'Video'].map(l => radio('mode', l, icon(l === 'Image' ? 'image' : 'videocam'))).join('');
+    h += `<button aria-label="Select model family">${S.model[S.mode]} ${icon('arrow_drop_down')}</button>`;
+    h += aspects.map(a => radio('aspect', a, icon('crop_' + a.replace(':', '_')) + ' ')).join('');
+    if (video && omni) h += ['4s', '6s', '8s', '10s'].map(d => radio('duration', d)).join('') +
+      ['360p', '720p'].map(r => radio('res', r, '', ' ' + icon('info'))).join('');
+    h += ['x1', 'x2', 'x3', 'x4'].map(c => radio('count', c)).join('');
+    if (video) h += `<p>Generating will use ${cost()} credits</p>`;
+    if (S.modelMenu) h += '<div role="menu">' + MODELS[S.mode].map(m => `<div role="menuitem" data-model="${m}">${m}</div>`).join('') + '</div>';
+  }
+  if (S.tileMenu === 'main') h += `<div role="menu"><button role="menuitem">${icon('download')}Download</button><button role="menuitem">${icon('delete')}Delete</button></div>`;
+  if (S.tileMenu === 'download') h += `<div role="menu"><button role="menuitem">${icon('download')}Download</button></div>` +
+    `<div role="menu"><button role="menuitem" data-original>Original size</button><button role="menuitem">Upscaled (1080p)</button></div>`;
+  document.getElementById('overlay').innerHTML = h;
+}
+
+let n = 0;
+function generate() {
+  const prompt = document.getElementById('box').innerText.trim();
+  S.prompts.push(prompt);
+  if (q.get('refuse')) {
+    setTimeout(() => { document.getElementById('messages').innerHTML += '<div>Generation failed</div><div>This prompt might violate our policies.</div>'; }, 800);
+    return;
+  }
+  const count = Number(S.count.slice(1)), kind = S.mode;
+  setTimeout(() => {
+    for (let i = 0; i < count; i++) {
+      const t = document.createElement('div');
+      t.className = 'tile';
+      n++;
+      t.innerHTML = kind === 'Image'
+        ? `<img alt="Generated image" src="/media/flow.google.com/asb/image-${n}.png"><button aria-label="More options">more_vert</button>`
+        : `<img alt="Generated video" src="/media/flow.google.com/asb/video-${n}=thumb"><button aria-label="More options">more_vert</button>`;
+      document.getElementById('grid').prepend(t);
+    }
+  }, 1500);
+}
+
+document.addEventListener('click', e => {
+  const t = e.target;
+  const r = t.closest('[role=radio]');
+  if (r) { S[r.dataset.group] = r.dataset.label; return render(); }
+  if (t.closest('[aria-label="Select model family"]')) { S.modelMenu = !S.modelMenu; return render(); }
+  const m = t.closest('[data-model]');
+  if (m) { S.model[S.mode] = m.dataset.model; S.modelMenu = false; S.popup = false; return render(); } // like Flow, picking a model closes the popup
+  if (t.closest('#trigger')) { S.popup = !S.popup; return render(); }
+  if (t.closest('#go')) return generate();
+  if (t.closest('[aria-label="More options"]')) { S.tileMenu = 'main'; return render(); }
+  const item = t.closest('[role=menuitem]');
+  if (item && /Download/.test(item.innerText) && S.tileMenu === 'main') { S.tileMenu = 'download'; return render(); }
+  if (item && item.hasAttribute('data-original')) {
+    S.downloads++;
+    const a = Object.assign(document.createElement('a'), { href: '/media/original.mp4', download: 'flow-video.mp4' });
+    document.body.append(a); a.click(); a.remove();
+    S.tileMenu = null; return render();
+  }
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { S.popup = false; S.modelMenu = false; S.tileMenu = null; render(); } });
+render();
+</script>
