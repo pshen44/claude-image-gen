@@ -69,7 +69,7 @@ test('outPath: a file, a folder, or a name made from the prompt', () => {
   assert.match(outPath('art/', 'a red barn', dir), new RegExp(`^${path.join(dir, 'art').replace(/\\/g, '\\\\')}[\\\\/]a-red-barn-\\d+$`));
   assert.match(outPath(dir, 'a red barn'), /[\\/]a-red-barn-\d+$/, 'an existing folder');
   assert.match(outPath(undefined, 'a red barn', dir), /[\\/]a-red-barn-\d+$/);
-  assert.strictEqual(outPath('/abs/x', 'p', dir), path.resolve('/abs/x'));
+  assert.strictEqual(outPath('/abs/x', 'p', dir), path.resolve(dir, '/abs/x'), 'on Windows a rooted path takes the drive of the base');
   fs.rmSync(dir, { recursive: true });
 });
 
