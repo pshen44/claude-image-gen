@@ -1,0 +1,30 @@
+name: Bug report
+description: Something failed or saved the wrong thing
+body:
+  - type: input
+    id: command
+    attributes:
+      label: The command you ran, or the MCP tool call
+      placeholder: claude-image-gen image "a red barn" -m nano-banana-pro
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: What it printed
+      description: The full error message and exit code.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Debug screenshot
+      description: Run it again with CIG_DEBUG=1 and drag the claude-image-gen-debug.png it saves in here. Flow changes its page often, and this shows what it looked like. Check it shows nothing private first.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: claude-image-gen --version, node --version, your OS and browser
+    validations:
+      required: true

@@ -1,0 +1,10 @@
+name: Feature request
+description: Something it should do
+body:
+  - type: textarea
+    id: want
+    attributes:
+      label: What you want to do
+      description: The task, not the solution. For example, "make a video from an image I already have".
+    validations:
+      required: true

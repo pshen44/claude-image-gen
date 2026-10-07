@@ -1,12 +1,12 @@
 # Homebrew formula. Install with:
-#   brew tap jonjoncheese/claude-image-gen https://github.com/jonjoncheese/claude-image-gen
-#   brew trust jonjoncheese/claude-image-gen
+#   brew tap pshen44/claude-image-gen https://github.com/pshen44/claude-image-gen
+#   brew trust pshen44/claude-image-gen
 #   brew install claude-image-gen
 class ClaudeImageGen < Formula
   desc "Generate images and videos with Google Flow from the command-line"
-  homepage "https://github.com/jonjoncheese/claude-image-gen"
-  url "https://raw.githubusercontent.com/jonjoncheese/claude-image-gen/v0.2.2/claude-image-gen.js"
-  sha256 "f6970ddc92d1bbfd6620c44f7d108f123138cb2178efcdc3fb49464e1f9db3d6"
+  homepage "https://github.com/pshen44/claude-image-gen"
+  url "https://raw.githubusercontent.com/pshen44/claude-image-gen/v0.3.0/claude-image-gen.js"
+  sha256 "7939630fd7d4e4fb3963da8c0d0d17c21c606e6b42f527b73bd548d78fac7ba3"
   license "MIT"
 
   depends_on "node"
