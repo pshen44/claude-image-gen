@@ -88,4 +88,4 @@ test('calls made at the same time are answered one after another, each with its 
   } finally { await s.close(); }
 });
 
-test.after(() => fs.rmSync(HOME, { recursive: true, force: true }));
+test.after(() => fs.rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }));

@@ -57,7 +57,7 @@ test.after(async () => {
   page?.close();
   await closeBrowser(b);
   server?.close();
-  fs.rmSync(HOME, { recursive: true, force: true });
+  fs.rmSync(HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); // Windows: Chrome lets go of its profile a moment after it exits
 });
 
 const fake = async (query = '') => { await page.goto(`${base}/project/fake${query}`); return page; };
@@ -160,6 +160,6 @@ test('end to end over MCP: a tool call launches the browser, makes the image and
   } finally {
     p.stdin.end();
     await new Promise(r => p.on('exit', r));
-    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 });
