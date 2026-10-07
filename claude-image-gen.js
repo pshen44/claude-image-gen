@@ -189,9 +189,15 @@ const fileAge = f => { try { return Date.now() - fs.statSync(f).mtimeMs; } catch
 async function lock(waitS = 900) {
   ensureHome();
   const deadline = Date.now() + waitS * 1000;
-  let told = false;
+  let told = false, deniedSince = 0;
   for (;;) {
-    try { fs.writeFileSync(LOCK, String(process.pid), { flag: 'wx' }); return; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    try { fs.writeFileSync(LOCK, String(process.pid), { flag: 'wx' }); return; } catch (e) {
+      // Windows refuses to create a file whose delete by another process is still pending (EPERM,
+      // EACCES or EBUSY rather than EEXIST). That clears in moments; a folder we cannot write to does not.
+      const denied = process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(e.code);
+      if (denied) deniedSince ||= Date.now(); else deniedSince = 0;
+      if (e.code !== 'EEXIST' && !(denied && Date.now() - deniedSince < 5000)) throw e;
+    }
     const pid = lockHolder();
     if (Date.now() > deadline) throw new CliError(`Another ${NAME} run (pid ${pid}) has held the browser for ${waitS}s. Wait for it, or delete ${LOCK} if it is stuck.`, EXIT.busy);
     if (pid === null) { await sleep(10); continue; } // released between our two steps; try again
