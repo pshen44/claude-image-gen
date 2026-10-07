@@ -1,8 +1,8 @@
 #!/bin/sh
 # claude-image-gen installer for macOS and Linux:
-#   curl -fsSL https://raw.githubusercontent.com/jonjoncheese/claude-image-gen/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/pshen44/claude-image-gen/main/install.sh | sh
 set -eu
-SRC="${CIG_REPO:-https://raw.githubusercontent.com/jonjoncheese/claude-image-gen/main}"
+SRC="${CIG_REPO:-https://raw.githubusercontent.com/pshen44/claude-image-gen/main}"
 DIR="${CIG_INSTALL_DIR:-$HOME/.local/share/claude-image-gen}"
 BIN="${CIG_BIN_DIR:-$HOME/.local/bin}"
 

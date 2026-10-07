@@ -12,10 +12,11 @@
     "mcp": "node claude-image-gen.js mcp"
   },
   "license": "MIT",
-  "author": "jonjoncheese (https://github.com/jonjoncheese)",
-  "homepage": "https://github.com/jonjoncheese/claude-image-gen#readme",
-  "bugs": "https://github.com/jonjoncheese/claude-image-gen/issues",
-  "repository": { "type": "git", "url": "git+https://github.com/jonjoncheese/claude-image-gen.git" },
+  "author": "pshen44 (https://github.com/pshen44)",
+  "contributors": ["jonjoncheese (https://github.com/jonjoncheese)"],
+  "homepage": "https://github.com/pshen44/claude-image-gen#readme",
+  "bugs": "https://github.com/pshen44/claude-image-gen/issues",
+  "repository": { "type": "git", "url": "git+https://github.com/pshen44/claude-image-gen.git" },
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "claude", "claude-code", "claude-code-plugin", "google-flow",
     "nano-banana", "veo", "image-generation", "video-generation", "ai-agents", "cli", "headless", "chrome-devtools-protocol"]
 }

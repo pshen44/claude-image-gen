@@ -11,7 +11,7 @@
   <a href="#mcp-server"><img src="https://img.shields.io/badge/MCP-server-8A2BE2?style=flat" alt="MCP server"></a>
   <a href="#install"><img src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux-supported-blue?style=flat" alt="macOS, Windows, Linux"></a>
   <a href="#claude-code"><img src="https://img.shields.io/badge/Claude_Code-plugin-orange?style=flat" alt="Claude Code plugin"></a>
-  <a href="https://github.com/jonjoncheese/claude-image-gen/actions/workflows/test.yml"><img src="https://github.com/jonjoncheese/claude-image-gen/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
+  <a href="https://github.com/pshen44/claude-image-gen/actions/workflows/test.yml"><img src="https://github.com/pshen44/claude-image-gen/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat" alt="MIT"></a>
 </p>
 
@@ -61,7 +61,7 @@ You need **Node.js 22+** and any **Chromium-based browser** (Chrome, Edge, Brave
 ### Claude Code: one command
 
 ```bash
-claude plugin marketplace add jonjoncheese/claude-image-gen && claude plugin install flow-image-gen@flow-image-gen
+claude plugin marketplace add pshen44/claude-image-gen && claude plugin install flow-image-gen@flow-image-gen
 ```
 
 The plugin brings the [MCP server](#mcp-server) (`generate_image`, `generate_video` and account tools) and a skill
@@ -99,15 +99,15 @@ claude-image-gen image "a red barn under a blue sky, flat illustration"
 
 ```bash
 # macOS (Homebrew; installs Node.js for you)
-brew tap jonjoncheese/claude-image-gen https://github.com/jonjoncheese/claude-image-gen && brew trust jonjoncheese/claude-image-gen && brew install claude-image-gen
+brew tap pshen44/claude-image-gen https://github.com/pshen44/claude-image-gen && brew trust pshen44/claude-image-gen && brew install claude-image-gen
 
 # macOS / Linux, without npm (installs Node.js through Homebrew if it's missing)
-curl -fsSL https://raw.githubusercontent.com/jonjoncheese/claude-image-gen/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/pshen44/claude-image-gen/main/install.sh | sh
 ```
 
 ```powershell
 # Windows (PowerShell; installs Node.js through winget if it's missing)
-irm https://raw.githubusercontent.com/jonjoncheese/claude-image-gen/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/pshen44/claude-image-gen/main/install.ps1 | iex
 ```
 
 Or skip installing: the whole tool is [one file](claude-image-gen.js). Download it and run `node claude-image-gen.js`,
@@ -251,7 +251,7 @@ Codes `2`, `4` and `6` only happen once every account has been tried.
 | `No Chromium-based browser found` | Install Chrome, Edge or Brave, or set `BROWSER_PATH` to one. |
 | MCP tools don't show up | Check `node --version` is 22 or newer, and run `npx -y claude-image-gen --version`. In Claude Code, `/mcp` lists servers and their errors. |
 | Google says the browser "may not be secure" while you sign in | Update the browser, or sign in with another one: `claude-image-gen login --browser edge`. |
-| Anything else | Run the command again with `CIG_DEBUG=1`. It saves `claude-image-gen-debug.png`, a screenshot of what Flow showed. Attach it to an [issue](https://github.com/jonjoncheese/claude-image-gen/issues). |
+| Anything else | Run the command again with `CIG_DEBUG=1`. It saves `claude-image-gen-debug.png`, a screenshot of what Flow showed. Attach it to an [issue](https://github.com/pshen44/claude-image-gen/issues). |
 
 <details>
 <summary>Settings (environment variables)</summary>
@@ -314,4 +314,4 @@ An independent project, not affiliated with, endorsed by or supported by Google 
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Originally created by [jonjoncheese](https://github.com/jonjoncheese); maintained by [pshen44](https://github.com/pshen44).

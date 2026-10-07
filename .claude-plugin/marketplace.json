@@ -3,8 +3,8 @@
   "name": "flow-image-gen",
   "description": "Free AI images and videos in Claude Code, through your own Google Flow account.",
   "owner": {
-    "name": "jonjoncheese",
-    "url": "https://github.com/jonjoncheese"
+    "name": "pshen44",
+    "url": "https://github.com/pshen44"
   },
   "plugins": [
     {

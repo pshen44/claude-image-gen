@@ -1,7 +1,7 @@
 # claude-image-gen installer for Windows (PowerShell 5.1+):
-#   irm https://raw.githubusercontent.com/jonjoncheese/claude-image-gen/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/pshen44/claude-image-gen/main/install.ps1 | iex
 $ErrorActionPreference = 'Stop'
-$src = if ($env:CIG_REPO) { $env:CIG_REPO } else { 'https://raw.githubusercontent.com/jonjoncheese/claude-image-gen/main' }
+$src = if ($env:CIG_REPO) { $env:CIG_REPO } else { 'https://raw.githubusercontent.com/pshen44/claude-image-gen/main' }
 $dir = Join-Path $env:LOCALAPPDATA 'claude-image-gen'
 
 function Test-Node {
